@@ -1,0 +1,1525 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MDT (MotegiDocumentTower)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- SortableJS for Drag and Drop -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <style>
+        /* Google FontsからInterフォントを読み込み */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            overscroll-behavior-y: none; /* Prevent pull-to-refresh */
+        }
+        /* カスタムスクロールバー */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+        /* ツリービューの開閉アニメーション */
+        .tree-node > ul {
+            transition: max-height 0.3s ease-in-out;
+            max-height: 1000px;
+            overflow: hidden;
+            padding-left: 20px;
+        }
+        .tree-node.collapsed > ul { max-height: 0; }
+        .tree-caret::before {
+            content: '▼'; display: inline-block;
+            transition: transform 0.3s; margin-right: 6px;
+        }
+        .tree-node.collapsed > .tree-item .tree-caret::before { transform: rotate(-90deg); }
+        .has-no-children > .tree-item .tree-caret { visibility: hidden; }
+        /* ドラッグ＆ドロップのスタイル */
+        .sortable-ghost { background: rgba(59, 130, 246, 0.3); opacity: 1; border: 1px dashed #3B82F6; }
+        .sortable-drag { opacity: 1 !important; }
+        .drop-zone-active { border: 2px dashed #3b82f6; background-color: #eff6ff; }
+        
+        /* コンテキストメニュー */
+        #context-menu {
+            position: absolute;
+            z-index: 1000;
+            display: none;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            padding: 8px 0;
+            min-width: 150px;
+        }
+        .dark #context-menu {
+            background-color: #1f2937; /* gray-800 */
+        }
+        .context-menu-item {
+            display: block;
+            width: 100%;
+            padding: 8px 16px;
+            text-align: left;
+            font-size: 14px;
+            color: #374151; /* gray-700 */
+        }
+        .dark .context-menu-item {
+            color: #d1d5db; /* gray-300 */
+        }
+        .context-menu-item:hover {
+            background-color: #f3f4f6; /* gray-100 */
+        }
+        .dark .context-menu-item:hover {
+            background-color: #374151; /* gray-700 */
+        }
+
+        /* タワーの3D表現 */
+        .tower-perspective {
+            perspective: 1500px;
+        }
+        .tower-body {
+            transform: rotateX(10deg);
+            transform-style: preserve-3d;
+            transition: transform 0.5s;
+        }
+        .tower-body:hover {
+            transform: rotateX(5deg) scale(1.02);
+        }
+        #preview-iframe {
+            min-height: 400px;
+        }
+
+        /* モバイル表示用のスタイル (画面幅が768px以下で適用) */
+        @media (max-width: 768px) {
+            #tree-pane {
+                position: fixed;
+                top: 0;
+                left: -100%;
+                width: 80%;
+                max-width: 300px;
+                height: 100%;
+                z-index: 2000;
+                transition: left 0.3s ease-in-out;
+            }
+            body.mobile-nav-active #tree-pane {
+                left: 0;
+            }
+            #mobile-nav-overlay {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background-color: rgba(0,0,0,0.5);
+                z-index: 1999;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity 0.3s ease-in-out;
+            }
+            body.mobile-nav-active #mobile-nav-overlay {
+                opacity: 1;
+                pointer-events: auto;
+            }
+            #main-content-area {
+                width: 100%;
+            }
+        }
+         /* レイアウトがずれないようにホバーエフェクトを修正 */
+        .tree-actions, .list-actions {
+            opacity: 0;
+            transition: opacity 0.2s ease-in-out;
+            min-width: 50px; /* 最小幅を確保 */
+        }
+        .tree-item:hover .tree-actions, tr:hover .list-actions {
+            opacity: 1;
+        }
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            background-color: #e5e7eb;
+            color: #4b5563;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 12px;
+            margin-right: 4px;
+            margin-bottom: 4px;
+        }
+        .dark .tag {
+             background-color: #374151;
+             color: #d1d5db;
+        }
+        .tag-remove {
+            margin-left: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200 flex flex-col h-screen">
+    <div id="mobile-nav-overlay"></div>
+    <!-- ヘッダー -->
+    <header class="bg-white dark:bg-gray-800 shadow-md p-4 flex justify-between items-center z-10 flex-shrink-0">
+        <div class="flex items-center space-x-3">
+             <!-- モバイル用メニューボタン -->
+            <button id="mobile-menu-btn" class="md:hidden p-1 mr-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+            </button>
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-blue-500 hidden sm:block" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+            </svg>
+            <h1 class="text-xl sm:text-2xl font-bold">MDT</h1>
+        </div>
+        <!-- ビュー切替 -->
+        <div class="flex items-center space-x-2 bg-gray-200 dark:bg-gray-700 p-1 rounded-lg">
+            <button id="explorer-view-btn" class="px-3 py-1 text-sm font-medium rounded-md bg-white dark:bg-gray-900 shadow">エクスプローラー</button>
+            <button id="tower-view-btn" class="px-3 py-1 text-sm font-medium rounded-md text-gray-600 dark:text-gray-300">タワー表示</button>
+        </div>
+    </header>
+
+    <!-- メインコンテンツ -->
+    <main class="flex-grow flex overflow-hidden">
+        <!-- 左ペイン: ツリービュー -->
+        <aside id="tree-pane" class="w-full md:w-1/3 md:max-w-sm bg-white dark:bg-gray-800 p-4 overflow-y-auto border-r border-gray-200 dark:border-gray-700 md:relative md:left-0">
+            <div id="tabs-container" class="mb-4 flex flex-wrap -mx-1"></div>
+            <div class="relative mb-4">
+                <input type="search" id="search-input" placeholder="検索 (例: status:完了 tag:重要)" class="w-full p-2 pl-8 border rounded-lg bg-gray-100 dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <svg class="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+            </div>
+            <h2 class="text-lg font-semibold mb-3">プロジェクト</h2>
+            <div id="tree-view" class="space-y-1">
+                <!-- ツリーがここに動的に生成されます -->
+            </div>
+        </aside>
+
+        <!-- 右ペイン: ビューコンテナ -->
+        <div id="main-content-area" class="flex-grow flex flex-col p-4 bg-gray-50 dark:bg-gray-800/50">
+            <!-- エクスプローラー表示 -->
+            <section id="explorer-view" class="flex-grow flex flex-col">
+                <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+                    <h2 id="current-folder-name" class="text-xl font-semibold truncate">アイテムを選択してください</h2>
+                    <div class="flex items-center gap-4">
+                         <div id="explorer-view-options" class="flex items-center space-x-2 bg-gray-200 dark:bg-gray-700 p-1 rounded-lg">
+                            <button id="list-view-btn" class="px-3 py-1 text-sm font-medium rounded-md bg-white dark:bg-gray-900 shadow">リスト</button>
+                            <button id="card-view-btn" class="px-3 py-1 text-sm font-medium rounded-md text-gray-600 dark:text-gray-300">カード</button>
+                        </div>
+                        <button id="add-item-btn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg flex items-center space-x-2 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5-H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd" /></svg>
+                            <span class="hidden sm:inline">追加</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="local-file-warning" class="hidden bg-yellow-100 dark:bg-yellow-900/20 border-l-4 border-yellow-500 text-yellow-700 dark:text-yellow-300 p-4 my-4 rounded-md" role="alert">
+                    <p class="font-bold">ローカルファイルリンクに関する注意</p>
+                    <p>プレビュー内の「パスをコピー」ボタンを使用すると、エクスプローラーで簡単に開けます。</p>
+                </div>
+                
+                <div id="explorer-content" class="flex-grow bg-white dark:bg-gray-800 rounded-lg shadow overflow-auto">
+                    <!-- List View Content -->
+                    <table id="list-view-content" class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+                        <thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-700 dark:text-gray-400">
+                            <tr>
+                                <th scope="col" class="px-6 py-3 w-1/2">名前</th>
+                                <th scope="col" class="px-6 py-3 hidden sm:table-cell">種類</th>
+                                <th scope="col" class="px-6 py-3 text-right">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="file-list"></tbody>
+                    </table>
+                    <!-- Card View Content -->
+                    <div id="card-view-content" class="hidden p-4">
+                        <div class="mb-4">
+                            <label for="group-by-tag-checkbox" class="inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="group-by-tag-checkbox" class="rounded border-gray-300 text-blue-600 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                <span class="ml-2 text-sm text-gray-600 dark:text-gray-300">タグでグループ化</span>
+                            </label>
+                        </div>
+                        <div id="card-list" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"></div>
+                    </div>
+
+                     <div id="empty-state" class="hidden text-center p-12 text-gray-500">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" /></svg>
+                        <p class="mt-4 text-lg">このフォルダは空です。</p>
+                        <p>ファイルをここにドラッグ＆ドロップするか、右上の「追加」ボタンから新しいアイテムを作成できます。</p>
+                    </div>
+                </div>
+            </section>
+
+             <!-- プレビュー表示 -->
+            <section id="preview-view" class="hidden flex-grow flex flex-col bg-white dark:bg-gray-800 rounded-lg shadow">
+                 <!-- Iframe for web pages -->
+                <div id="preview-iframe-container" class="w-full h-full flex flex-col hidden">
+                    <div class="p-2 border-b dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400">
+                        プレビューが表示されない場合は、<a id="preview-new-tab-link" href="#" target="_blank" rel="noopener noreferrer" class="text-blue-500 hover:underline">新しいタブで開く</a>
+                    </div>
+                    <iframe id="preview-iframe" class="w-full flex-grow border-0"></iframe>
+                </div>
+                <!-- Image preview -->
+                <div id="preview-image-container" class="w-full h-full flex items-center justify-center p-4 hidden">
+                    <img id="preview-image" src="" alt="Image preview" class="max-w-full max-h-full object-contain">
+                </div>
+                <!-- Local file info -->
+                <div id="preview-local-container" class="w-full h-full flex flex-col items-center justify-center p-8 text-center hidden">
+                    <div id="preview-local-icon" class="w-24 h-24 mb-4"></div>
+                    <h3 id="preview-local-name" class="text-xl font-bold mb-2"></h3>
+                    <p class="text-sm text-gray-500 dark:text-gray-400 break-all" id="preview-local-url"></p>
+                    <div class="mt-6 bg-yellow-100 dark:bg-yellow-900/20 border-l-4 border-yellow-500 text-yellow-700 dark:text-yellow-300 p-4 rounded-md text-left">
+                        <p class="font-bold">ローカルファイルを開くには</p>
+                        <p>下の「パスをコピー」ボタンをクリックし、エクスプローラーのアドレスバーに貼り付けてEnterキーを押してください。</p>
+                    </div>
+                    <button id="copy-path-btn" class="mt-4 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-lg flex items-center space-x-2 transition">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M7 9a2 2 0 012-2h6a2 2 0 012 2v6a2 2 0 01-2 2H9a2 2 0 01-2-2V9z" /><path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2V4a2 2 0 00-2-2H4z" /></svg>
+                        <span>パスをコピー</span>
+                    </button>
+                </div>
+            </section>
+            
+            <!-- タワー表示 -->
+            <section id="tower-view" class="hidden flex-grow flex flex-col p-4 sm:p-8 bg-gradient-to-br from-gray-100 to-gray-300 dark:from-gray-800 dark:to-gray-900 overflow-y-auto">
+                <h2 class="text-2xl font-semibold mb-6 text-center text-gray-700 dark:text-gray-300">ドキュメントタワー</h2>
+                <div id="tower-container" class="w-full flex-grow flex items-center justify-center tower-perspective">
+                    <!-- タワーがここに動的に生成されます -->
+                </div>
+                 <p id="tower-empty-state" class="hidden text-gray-500 text-center mt-8">タワーは空です。ステータスが設定されたアイテムを追加してください。</p>
+            </section>
+        </div>
+    </main>
+    
+    <!-- モーダルウィンドウ -->
+    <div id="item-modal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden items-center justify-center">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md m-4 overflow-y-auto" style="max-height: 90vh;">
+            <form id="item-form" class="p-6 space-y-4">
+                <h3 id="modal-title" class="text-xl font-semibold">新しいアイテムを追加</h3>
+                <input type="hidden" id="item-id">
+                <input type="hidden" id="parent-id">
+                
+                <div id="url-paste-container">
+                     <label for="url-paste-input" class="block mb-2 text-sm font-medium">URLを貼り付け</label>
+                     <input type="text" id="url-paste-input" placeholder="URLを貼り付けると自動解析します" class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400">
+                </div>
+                
+                <div id="manual-input-divider" class="text-center text-gray-500 dark:text-gray-400 my-2">または</div>
+
+                <div id="detailed-fields">
+                    <div>
+                        <label for="item-type" class="block mb-2 text-sm font-medium">種類</label>
+                        <select id="item-type" class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:focus:ring-blue-500 dark:focus:border-blue-500">
+                            <option value="project">プロジェクト</option>
+                            <option value="folder">フォルダ</option>
+                            <option value="web">Webページ</option>
+                            <option value="local">ローカルファイル</option>
+                            <option value="sharepoint">SharePoint</option>
+                            <option value="gdrive">Google Drive</option>
+                        </select>
+                    </div>
+                    <div id="category-field-container" class="hidden">
+                        <label for="item-category" class="block mb-2 text-sm font-medium">カテゴリ (タブ)</label>
+                        <input type="text" id="item-category" placeholder="例: 仕事, プライベート" class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400">
+                    </div>
+                    <div>
+                        <label for="item-name" class="block mb-2 text-sm font-medium">名前</label>
+                        <input type="text" id="item-name" placeholder="Webページのタイトルなど" class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400" required>
+                    </div>
+                    <div id="url-field-container">
+                        <label id="item-url-label" for="item-url" class="block mb-2 text-sm font-medium">URL</label>
+                        <input type="text" id="item-url" placeholder="https://..." class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400">
+                    </div>
+                     <div id="status-field-container">
+                        <label for="item-status" class="block mb-2 text-sm font-medium">状態</label>
+                        <select id="item-status" class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:focus:ring-blue-500 dark:focus:border-blue-500">
+                            <option value="なし">なし (タワーに表示しない)</option>
+                            <option value="未着手">未着手</option>
+                            <option value="作業中">作業中</option>
+                            <option value="レビュー中">レビュー中</option>
+                            <option value="完了">完了</option>
+                        </select>
+                    </div>
+                    <div id="tags-field-container">
+                        <label for="item-tags-input" class="block mb-2 text-sm font-medium">タグ</label>
+                        <div id="tag-chips-container" class="flex flex-wrap gap-2 mb-2"></div>
+                        <input type="text" id="item-tags-input" placeholder="タグを入力してEnter or カンマ" class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400">
+                    </div>
+                    <div id="notes-field-container">
+                        <label for="item-notes" class="block mb-2 text-sm font-medium">メモ</label>
+                        <textarea id="item-notes" rows="3" placeholder="補足情報やタスクなどを入力" class="bg-gray-50 border border-gray-300 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400"></textarea>
+                    </div>
+                </div>
+
+                <div class="flex justify-end pt-4 space-x-2">
+                    <button type="button" id="cancel-btn" class="text-gray-500 bg-white hover:bg-gray-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-gray-200 text-sm font-medium px-5 py-2.5 hover:text-gray-900 focus:z-10 dark:bg-gray-700 dark:text-gray-300 dark:border-gray-500 dark:hover:text-white dark:hover:bg-gray-600 dark:focus:ring-gray-600">キャンセル</button>
+                    <button type="submit" class="text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- コンテキストメニュー -->
+    <div id="context-menu"></div>
+
+
+    <script>
+        // --- 全てのスクリプトをここに記述 ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- DOM要素 ---
+            const treeView = document.getElementById('tree-view');
+            const fileList = document.getElementById('file-list');
+            const cardList = document.getElementById('card-list');
+            const currentFolderName = document.getElementById('current-folder-name');
+            const addItemBtn = document.getElementById('add-item-btn');
+            const modal = document.getElementById('item-modal');
+            const modalTitle = document.getElementById('modal-title');
+            const itemForm = document.getElementById('item-form');
+            const cancelBtn = document.getElementById('cancel-btn');
+            const urlPasteContainer = document.getElementById('url-paste-container');
+            const urlPasteInput = document.getElementById('url-paste-input');
+            const manualInputDivider = document.getElementById('manual-input-divider');
+            const detailedFields = document.getElementById('detailed-fields');
+            const itemTypeSelect = document.getElementById('item-type');
+            const itemCategoryInput = document.getElementById('item-category');
+            const categoryFieldContainer = document.getElementById('category-field-container');
+            const itemNameInput = document.getElementById('item-name');
+            const itemUrlInput = document.getElementById('item-url');
+            const itemStatusSelect = document.getElementById('item-status');
+            const itemNotesTextarea = document.getElementById('item-notes');
+            const itemTagsInput = document.getElementById('item-tags-input');
+            const tagChipsContainer = document.getElementById('tag-chips-container');
+            const urlFieldContainer = document.getElementById('url-field-container');
+            const statusFieldContainer = document.getElementById('status-field-container');
+            const tagsFieldContainer = document.getElementById('tags-field-container');
+            const notesFieldContainer = document.getElementById('notes-field-container');
+            const explorerContent = document.getElementById('explorer-content');
+            const emptyState = document.getElementById('empty-state');
+            const localFileWarning = document.getElementById('local-file-warning');
+            const mainContentArea = document.getElementById('main-content-area');
+            const explorerView = document.getElementById('explorer-view');
+            const towerView = document.getElementById('tower-view');
+            const previewView = document.getElementById('preview-view');
+            const explorerViewBtn = document.getElementById('explorer-view-btn');
+            const towerViewBtn = document.getElementById('tower-view-btn');
+            const treePane = document.getElementById('tree-pane');
+            const contextMenu = document.getElementById('context-menu');
+            const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+            const mobileNavOverlay = document.getElementById('mobile-nav-overlay');
+            const listViewBtn = document.getElementById('list-view-btn');
+            const cardViewBtn = document.getElementById('card-view-btn');
+            const listViewContent = document.getElementById('list-view-content');
+            const cardViewContent = document.getElementById('card-view-content');
+            const groupByTagCheckbox = document.getElementById('group-by-tag-checkbox');
+            const tabsContainer = document.getElementById('tabs-container');
+            const searchInput = document.getElementById('search-input');
+
+            // --- 状態管理 ---
+            let data = [];
+            let selectedItemId = null;
+            let expandedNodes = new Set();
+            let currentView = 'explorer';
+            let currentExplorerView = 'list';
+            let activeTab = 'すべて';
+            
+            const sampleData = [
+                { id: 'proj-1', name: 'プロジェクトA', type: 'project', category: '仕事', children: [
+                    { id: 'folder-1-1', name: '設計資料', type: 'folder', children: [
+                        { id: 'link-1-1-1', name: '要件定義書.docx', type: 'sharepoint', url: 'https://example.sharepoint.com/doc1', status: '作業中', notes: '担当：佐藤', tags: ['重要', '設計'] },
+                        { id: 'link-1-1-2', name: '基本設計書.pptx', type: 'gdrive', url: 'https://docs.google.com/p/123', status: '未着手', notes: '', tags: ['設計'] }
+                    ]},
+                    { id: 'link-1-2', name: 'プロジェクト管理表.xlsx', type: 'gdrive', url: 'https://docs.google.com/s/456', status: '完了', notes: '毎週金曜更新', tags: ['管理'] },
+                     { id: 'link-1-3', name: '画面一覧.pdf', type: 'gdrive', url: 'https://docs.google.com/s/789', status: 'レビュー中', notes: '鈴木さんに確認依頼', tags: ['設計', '確認待ち'] },
+                ]},
+                { id: 'proj-2', name: '共通資料', type: 'project', category: '仕事', children: [
+                     { id: 'link-2-1', name: 'MDTリポジトリ', type: 'web', url: 'https://github.com/example/mdt', status: '完了', notes: '', tags: [] },
+                     { id: 'link-2-2', name: '勤怠システム', type: 'web', url: 'https://login.salesforce.com/', status: 'なし', notes: '', tags: ['社内システム'] },
+                     { id: 'link-2-3', name: 'テスト計画書.pdf', type: 'local', url: 'file:///C:/Users/test/Documents/test.pdf', status: '未着手', notes: '', tags: ['テスト'] }
+                ]},
+                { id: 'proj-3', name: '旅行計画', type: 'project', category: 'プライベート', children: [] }
+            ];
+
+            // --- 初期化 ---
+            function init() {
+                loadData();
+                data.forEach(p => {
+                    if(p.children) p.children.forEach(c => detectAndAssignType(c, true))
+                });
+                render();
+                setupEventListeners();
+                if (data.length > 0 && !selectedItemId) selectItem(data[0].id);
+                else if (data.length === 0) addItemBtn.disabled = true;
+            }
+
+            // --- データ永続化 ---
+            function saveData() { localStorage.setItem('mdtData', JSON.stringify(data)); }
+            function loadData() {
+                const savedData = localStorage.getItem('mdtData');
+                const savedExpanded = localStorage.getItem('mdtExpanded');
+                data = savedData ? JSON.parse(savedData) : sampleData;
+                expandedNodes = savedExpanded ? new Set(JSON.parse(savedExpanded)) : new Set(['proj-1']);
+            }
+            function saveExpandedState() { localStorage.setItem('mdtExpanded', JSON.stringify(Array.from(expandedNodes))); }
+
+            // --- レンダリング制御 ---
+            function render() {
+                renderTabs();
+                if (currentView === 'explorer') renderExplorerView();
+                else if (currentView === 'tower') renderTowerView();
+            }
+
+            function renderExplorerView() {
+                renderTreeView();
+                const selectedItem = findItemById(selectedItemId, data);
+                if (selectedItem && !['project', 'folder'].includes(selectedItem.type)) {
+                    showPreviewView(selectedItem);
+                } else {
+                    showFileListView();
+                }
+            }
+            
+            // --- ツリービュー ---
+            function renderTreeView() {
+                treeView.innerHTML = '';
+                const filteredData = getFilteredData();
+                const tree = buildTree(filteredData);
+                treeView.appendChild(tree);
+                const lists = treeView.querySelectorAll('ul.tree-children-list');
+                lists.forEach(list => {
+                    new Sortable(list, {
+                        group: 'nested', animation: 150, fallbackOnBody: true, swapThreshold: 0.65, onEnd: handleDrop
+                    });
+                });
+            }
+            
+            function buildTree(items) {
+                const ul = document.createElement('ul');
+                if (items === getFilteredData()) ul.classList.add('tree-children-list'); 
+                items.forEach(item => {
+                    const li = document.createElement('li');
+                    li.className = 'tree-node';
+                    li.dataset.id = item.id;
+                    if (!expandedNodes.has(item.id) && item.children) li.classList.add('collapsed');
+                    if (!item.children || item.children.length === 0) li.classList.add('has-no-children');
+
+                    const treeItemDiv = document.createElement('div');
+                    treeItemDiv.className = `tree-item flex items-center p-2 rounded-md cursor-pointer ${selectedItemId === item.id ? 'bg-blue-100 dark:bg-blue-900' : 'hover:bg-gray-100 dark:hover:bg-gray-700'}`;
+                    
+                    const statusColor = getStatusColorClass(item.status);
+                    treeItemDiv.innerHTML = `
+                        <span class="tree-caret"></span>
+                        <div class="w-5 h-5 mr-2 flex-shrink-0">${getIcon(item, 'w-5 h-5')}</div>
+                        <span class="flex-grow truncate ${statusColor}">${item.name}</span>
+                        <div class="tree-actions ml-auto flex items-center">
+                            <button data-action="edit" data-id="${item.id}" class="text-gray-400 hover:text-blue-500 p-1">&#9998;</button>
+                            <button data-action="delete" data-id="${item.id}" class="text-gray-400 hover:text-red-500 p-1">&#10006;</button>
+                        </div>
+                    `;
+                    addContextMenuListener(treeItemDiv, item.id);
+                    li.appendChild(treeItemDiv);
+
+                    if (item.children) {
+                        const childrenUl = buildTree(item.children);
+                        childrenUl.classList.add('tree-children-list');
+                        li.appendChild(childrenUl);
+                    }
+                    ul.appendChild(li);
+                });
+                return ul;
+            }
+
+            // --- ファイルリストとプレビューの表示切替 ---
+            function showFileListView() {
+                explorerContent.classList.remove('hidden');
+                previewView.classList.add('hidden');
+                if (currentExplorerView === 'list') {
+                    listViewContent.classList.remove('hidden');
+                    cardViewContent.classList.add('hidden');
+                    renderFileListView();
+                } else {
+                    listViewContent.classList.add('hidden');
+                    cardViewContent.classList.remove('hidden');
+                    renderCardView();
+                }
+            }
+
+            function showPreviewView(item) {
+                explorerContent.classList.add('hidden');
+                previewView.classList.remove('hidden');
+                renderPreview(item);
+            }
+
+            // --- ファイルリストビュー ---
+            function renderFileListView() {
+                const selectedItem = findItemById(selectedItemId, data);
+                fileList.innerHTML = '';
+                
+                if (!selectedItem || !['project', 'folder'].includes(selectedItem.type)) {
+                    currentFolderName.textContent = 'プロジェクトを選択';
+                    addItemBtn.disabled = true;
+                    emptyState.classList.remove('hidden');
+                    return;
+                }
+                
+                addItemBtn.disabled = false;
+                currentFolderName.textContent = selectedItem.name;
+                const children = selectedItem.children || [];
+                
+                emptyState.classList.toggle('hidden', children.length > 0);
+                
+                let hasLocalFile = false;
+                children.forEach(item => {
+                    if(item.type === 'local') hasLocalFile = true;
+                    const row = document.createElement('tr');
+                    row.className = 'bg-white border-b dark:bg-gray-800 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600';
+                    
+                    const statusColor = getStatusColorClass(item.status);
+                    row.innerHTML = `
+                        <td class="px-6 py-4 font-medium text-gray-900 dark:text-white whitespace-nowrap">
+                            <div class="flex items-center space-x-3 group cursor-pointer" data-id="${item.id}" data-action="select">
+                                <div class="w-6 h-6 flex-shrink-0">${getIcon(item, 'w-6 h-6')}</div>
+                                <span class="${statusColor} group-hover:underline group-hover:text-blue-500">${item.name}</span>
+                            </div>
+                        </td>
+                        <td class="px-6 py-3 hidden sm:table-cell">${getTypeName(item.type, item.name)}</td>
+                        <td class="px-6 py-4 text-right">
+                            <div class="list-actions inline-flex space-x-2">
+                                <button data-action="edit" data-id="${item.id}" class="font-medium text-blue-600 dark:text-blue-500 hover:underline">編集</button>
+                                <button data-action="delete" data-id="${item.id}" class="font-medium text-red-600 dark:text-red-500 hover:underline">削除</button>
+                            </div>
+                        </td>
+                    `;
+                    addContextMenuListener(row, item.id);
+                    fileList.appendChild(row);
+                });
+                if(localFileWarning) localFileWarning.classList.toggle('hidden', !hasLocalFile);
+            }
+
+            // --- カードビュー ---
+            function renderCardView() {
+                const selectedItem = findItemById(selectedItemId, data);
+                cardList.innerHTML = ''; // Clear previous cards
+
+                if (!selectedItem || !['project', 'folder'].includes(selectedItem.type)) {
+                    emptyState.classList.remove('hidden');
+                    return;
+                }
+
+                const children = selectedItem.children || [];
+                emptyState.classList.toggle('hidden', children.length > 0);
+                
+                const groupByTag = groupByTagCheckbox.checked;
+
+                if (groupByTag) {
+                    const taggedItems = {};
+                    const untaggedItems = [];
+                    
+                    children.forEach(item => {
+                        if (item.tags && item.tags.length > 0) {
+                            item.tags.forEach(tag => {
+                                if (!taggedItems[tag]) taggedItems[tag] = [];
+                                taggedItems[tag].push(item);
+                            });
+                        } else {
+                            untaggedItems.push(item);
+                        }
+                    });
+
+                    const sortedTags = Object.keys(taggedItems).sort();
+
+                    sortedTags.forEach(tag => {
+                        const groupWrapper = document.createElement('div');
+                        groupWrapper.className = 'col-span-full border-t pt-4 mt-4 first:mt-0 first:border-t-0';
+                        const groupTitle = document.createElement('h3');
+                        groupTitle.className = 'text-lg font-semibold mb-2 text-gray-700 dark:text-gray-300';
+                        groupTitle.textContent = `タグ: ${tag}`;
+                        groupWrapper.appendChild(groupTitle);
+                        
+                        const groupGrid = document.createElement('div');
+                        groupGrid.className = 'grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4';
+                        taggedItems[tag].forEach(item => groupGrid.appendChild(createCard(item)));
+                        groupWrapper.appendChild(groupGrid);
+                        cardList.appendChild(groupWrapper);
+                    });
+
+                    if (untaggedItems.length > 0) {
+                        const groupWrapper = document.createElement('div');
+                        groupWrapper.className = 'col-span-full border-t pt-4 mt-4 first:mt-0 first:border-t-0';
+                        const groupTitle = document.createElement('h3');
+                        groupTitle.className = 'text-lg font-semibold mb-2 text-gray-700 dark:text-gray-300';
+                        groupTitle.textContent = 'タグなし';
+                        groupWrapper.appendChild(groupTitle);
+
+                        const groupGrid = document.createElement('div');
+                        groupGrid.className = 'grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4';
+                        untaggedItems.forEach(item => groupGrid.appendChild(createCard(item)));
+                        groupWrapper.appendChild(groupGrid);
+                        cardList.appendChild(groupWrapper);
+                    }
+
+                } else {
+                    cardList.className = 'grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4';
+                    children.forEach(item => cardList.appendChild(createCard(item)));
+                }
+            }
+
+            function createCard(item) {
+                const card = document.createElement('div');
+                card.className = 'bg-white dark:bg-gray-700 rounded-lg shadow border dark:border-gray-600 flex flex-col cursor-pointer transition hover:shadow-lg hover:border-blue-500';
+                addContextMenuListener(card, item.id);
+
+                card.addEventListener('click', (e) => {
+                    if (!e.target.closest('button')) {
+                        selectItem(item.id);
+                    }
+                });
+
+                const nameColor = getStatusColorClass(item.status);
+
+                let tagsHTML = '';
+                if (item.tags && item.tags.length > 0) {
+                    tagsHTML = item.tags.map(tag => `<span class="tag">${tag}</span>`).join('');
+                }
+
+                card.innerHTML = `
+                    <div class="p-4 flex-grow">
+                        <div class="flex items-start justify-between">
+                            <div class="flex items-center space-x-3 mb-2">
+                                <div class="w-8 h-8 flex-shrink-0">${getIcon(item, 'w-8 h-8')}</div>
+                                <div>
+                                    <p class="font-bold ${nameColor} leading-tight">${item.name}</p>
+                                    <p class="text-xs text-gray-500 dark:text-gray-400">${getTypeName(item.type, item.name)}</p>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="text-xs text-gray-600 dark:text-gray-300 mt-2 h-8 overflow-hidden overflow-ellipsis">${item.notes || ''}</p>
+                        <div class="mt-2 h-12 overflow-y-auto">${tagsHTML}</div>
+                    </div>
+                    <div class="bg-gray-50 dark:bg-gray-800/50 p-2 border-t dark:border-gray-600 text-right">
+                        <button data-action="edit" data-id="${item.id}" class="font-medium text-blue-600 dark:text-blue-500 hover:underline px-2 py-1 text-xs">編集</button>
+                        <button data-action="delete" data-id="${item.id}" class="font-medium text-red-600 dark:text-red-500 hover:underline px-2 py-1 text-xs">削除</button>
+                    </div>
+                `;
+                 card.querySelector('[data-action="edit"]').addEventListener('click', (e) => { e.stopPropagation(); handleEdit(item.id); });
+                 card.querySelector('[data-action="delete"]').addEventListener('click', (e) => { e.stopPropagation(); handleDelete(item.id); });
+                return card;
+            }
+
+
+            // --- プレビュー表示 ---
+            function renderPreview(item) {
+                currentFolderName.textContent = item.name;
+                const containers = ['preview-iframe-container', 'preview-image-container', 'preview-local-container'];
+                containers.forEach(id => document.getElementById(id).classList.add('hidden'));
+
+                const isImage = item.url && /\.(jpg|jpeg|png|gif|svg|webp)$/i.test(item.url);
+
+                if (isImage) {
+                    const container = document.getElementById('preview-image-container');
+                    document.getElementById('preview-image').src = item.url;
+                    container.classList.remove('hidden');
+                } else if (item.type === 'local') {
+                    const container = document.getElementById('preview-local-container');
+                    document.getElementById('preview-local-icon').innerHTML = getIcon(item, 'w-full h-full');
+                    document.getElementById('preview-local-name').textContent = item.name;
+                    document.getElementById('preview-local-url').textContent = item.url;
+                    document.getElementById('copy-path-btn').onclick = () => copyToClipboard(item.url);
+                    container.classList.remove('hidden');
+                } else if (item.url) { // Web page
+                    const container = document.getElementById('preview-iframe-container');
+                    document.getElementById('preview-new-tab-link').href = item.url;
+                    document.getElementById('preview-iframe').src = item.url;
+                    container.classList.remove('hidden');
+                } else {
+                    showFileListView();
+                }
+            }
+            
+            // --- タワービュー ---
+            function renderTowerView() {
+                const towerContainer = document.getElementById('tower-container');
+                const towerEmptyState = document.getElementById('tower-empty-state');
+                towerContainer.innerHTML = '';
+
+                const allItems = [];
+                const collectItems = (items) => {
+                    items.forEach(item => {
+                        if (item.children) collectItems(item.children);
+                        else allItems.push(item);
+                    });
+                };
+                collectItems(getFilteredData());
+                
+                const itemsWithStatus = allItems.filter(item => item.status && item.status !== 'なし');
+
+                towerEmptyState.classList.toggle('hidden', itemsWithStatus.length > 0);
+                if(itemsWithStatus.length === 0) return;
+
+                const groupedItems = itemsWithStatus.reduce((acc, item) => {
+                    (acc[item.status] = acc[item.status] || []).push(item);
+                    return acc;
+                }, {});
+
+                const statusOrder = ['完了', 'レビュー中', '作業中', '未着手'];
+
+                const towerWrapper = document.createElement('div');
+                towerWrapper.className = "flex flex-col items-center";
+
+                const towerDiv = document.createElement('div');
+                towerDiv.className = 'w-48 sm:w-56 md:w-64 flex flex-col-reverse tower-body';
+
+                const statusColors = {
+                    '未着手': 'bg-gray-500', '作業中': 'bg-blue-500', 'レビュー中': 'bg-yellow-500', '完了': 'bg-green-500'
+                };
+
+                for (const status of statusOrder) {
+                    const items = groupedItems[status] || [];
+                    const blockHeight = Math.max(items.length * 16, 65);
+                    const colorClass = statusColors[status] || 'bg-indigo-500';
+                    const borderColorClass = colorClass.replace('500', '700').replace('600', '800');
+
+                    const blockDiv = document.createElement('div');
+                    blockDiv.style.minHeight = `65px`;
+                    blockDiv.style.height = `${blockHeight}px`;
+                    blockDiv.className = `${colorClass} p-2 flex flex-col overflow-hidden relative border-b-8 ${borderColorClass} dark:border-black/50 first:rounded-b-lg`;
+                    
+                    const sideShadow = document.createElement('div');
+                    sideShadow.className = 'absolute top-0 right-0 h-full w-5 bg-black/20';
+                    blockDiv.appendChild(sideShadow);
+
+                    const contentWrapper = document.createElement('div');
+                    contentWrapper.className = 'relative z-10 flex flex-col h-full';
+
+                    const headerDiv = document.createElement('div');
+                    headerDiv.className = 'flex-shrink-0 text-white text-xs sm:text-sm font-bold truncate mb-1';
+                    headerDiv.style.textShadow = '1px 1px 2px rgba(0,0,0,0.5)';
+                    headerDiv.textContent = `${status} (${items.length})`;
+                    
+                    const iconsContainer = document.createElement('div');
+                    iconsContainer.className = 'tower-drop-zone flex-grow flex flex-wrap content-start gap-1 sm:gap-2 overflow-y-auto';
+                    iconsContainer.dataset.status = status;
+                    
+                    items.forEach(item => {
+                        const iconWrapper = document.createElement('div');
+                        iconWrapper.dataset.id = item.id;
+                        iconWrapper.title = item.name;
+                        iconWrapper.className = 'text-white/80 hover:text-white transition drop-shadow-lg cursor-grab';
+                        iconWrapper.innerHTML = getIcon(item, 'w-5 h-5 sm:w-6 h-6');
+                        
+                        iconWrapper.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            selectItem(item.id);
+                        });
+
+                        iconsContainer.appendChild(iconWrapper);
+                    });
+                    
+                    contentWrapper.appendChild(headerDiv);
+                    contentWrapper.appendChild(iconsContainer);
+                    blockDiv.appendChild(contentWrapper);
+
+                    towerDiv.appendChild(blockDiv);
+                }
+                
+                const baseDiv = document.createElement('div');
+                baseDiv.className = "w-56 sm:w-64 md:w-72 h-4 bg-gray-400 dark:bg-gray-700 rounded-b-md border-b-4 border-gray-600 dark:border-black/50";
+                
+                towerWrapper.appendChild(towerDiv);
+                towerWrapper.appendChild(baseDiv);
+                towerContainer.appendChild(towerWrapper);
+
+                const dropZones = document.querySelectorAll('.tower-drop-zone');
+                dropZones.forEach(zone => {
+                    new Sortable(zone, {
+                        group: 'tower-dnd',
+                        animation: 150,
+                        onEnd: function(evt) {
+                            const itemId = evt.item.dataset.id;
+                            const newStatus = evt.to.dataset.status;
+                            if(itemId && newStatus) {
+                                updateItemStatus(itemId, newStatus);
+                            }
+                        }
+                    });
+                });
+            }
+
+            // --- アイコン & 種類 取得ロジック ---
+            const serviceMaster = {
+                github: { name: 'GitHub', icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.81 24 17.3 24 12 24 5.373 18.627 0 12 0z"/></svg>`},
+                m365: { name: 'Office 365', icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M2 6.24v11.52c0 1.12.91 2.03 2.03 2.03h1.22V4.21H4.03C2.91 4.21 2 5.12 2 6.24zM5.76 21.79h8.49c1.12 0 2.03-.91 2.03-2.03v-3.05H5.76v5.08zm0-6.59h10.52V9.12H5.76v6.08zm0-7.59h10.52V4.21H5.76v3.4zM22 8.26v7.48c0 1.12-.91 2.03-2.03 2.03H17.7v-15.6h2.27c1.12 0 2.03.91 2.03 2.03v4.06z"/></svg>`},
+                box: { name: 'Box', icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12.72,1.38C10.74,0.5,8.44,1.46,7.5,3.41c-1.12,2.33,0,5.06,2.33,6.2c0.55,0.27,1.15,0.41,1.75,0.41c1.33,0,2.6-0.67,3.35-1.85 C16.59,5.83,15.42,2.6,12.72,1.38z M11.83,21.5c-2.42,0.88-5.15-0.15-6.2-2.36c-0.85-1.77,0-3.96,1.78-4.8c1.33-0.64,2.88-0.44,4.03,0.5 c1.53,1.26,2,3.36,1.15,5C12.31,20.5,12.08,21.05,11.83,21.5z M20.35,16.48c-1.31,2.15-3.98,3.01-6.2,2.23 c-0.25-0.09-0.49-0.2-0.72-0.33c-1.78-0.85-2.61-2.98-1.78-4.8c0.64-1.33,2-2.19,3.48-2.19c0.6,0,1.2,0.14,1.75,0.42 C19.29,12.7,21.2,14.77,20.35,16.48z"/></svg>`},
+                dropbox: { name: 'Dropbox', icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4L6 8l6 4-6 4 6 4 6-4-6-4 6-4-6-4zm0 5.6L9 8l3-2 3 2-3 1.6zm0 8.8L9 16l3-2 3 2-3 1.6zM6 12l3-2 3 2-3 2-3-2zm12 0l-3 2-3-2 3-2 3 2z"/></svg>`}
+            };
+
+            function getIcon(item, classes = 'h-6 w-6') {
+                const ext = item.name.split('.').pop().toLowerCase();
+                if (item.type in serviceMaster) return serviceMaster[item.type].icon.replace('<svg ', `<svg class="${classes}" `);
+
+                if (item.type === 'web' && item.url) {
+                    try {
+                        const domain = new URL(item.url).hostname;
+                        const fallbackSvg = getDefaultIcon('web', classes);
+                        const escapedSvg = fallbackSvg.replace(/"/g, "'");
+                        return `<img src="https://www.google.com/s2/favicons?sz=64&domain=${domain}" class="${classes} rounded-sm" alt="favicon" onerror="this.outerHTML = \`${escapedSvg}\`;">`;
+                    } catch (e) { return getDefaultIcon('web', classes); }
+                }
+                return getDefaultIcon(item.type, classes, ext);
+            }
+            
+            function getDefaultIcon(type, classes, ext) {
+                const iconMap = {
+                    project: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2-2H4a2 2 0 01-2-2V6z" /></svg>`,
+                    folder: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" /></svg>`,
+                    sharepoint: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M5.22,4.22L4.22,5.22L9,10L4,15H10.11L12,13.11L13.89,15H20L15,10L20,5H13.89L12,6.89L10.11,5H4V4.22M6.33,6H9.11L12,8.89L14.89,6H17.67L14,10L17.67,14H14.89L12,11.11L9.11,14H6.33L10,10L6.33,6Z" /></svg>`,
+                    gdrive: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M7.71,3.5L1.5,14.08L4.59,19.5L10.7,8.91M9.5,4.5L12,0L22.5,10.5L18.42,17.58L9.5,4.5M18.81,18.81L12,24L8,17L11.58,11.21L18.81,18.81Z" /></svg>`,
+                    pdf: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5C3.9 3 3 3.9 3 5V19C3 20.1 3.9 21 5 21H19C20.1 21 21 20.1 21 19V5C21 3.9 20.1 3 19 3M9.5 11.5C9.5 12.3 8.8 13 8 13H7V15H5.5V9H8C8.8 9 9.5 9.7 9.5 10.5V11.5M14.5 13.5C14.5 14.3 13.8 15 13 15H10.5V9H13C13.8 9 14.5 9.7 14.5 10.5V13.5M18.5 10.5H17V11.5H18.5V13H17V15H15.5V9H18.5V10.5M13 10.5H12V13.5H13V10.5M8 10.5H7V11.5H8V10.5Z" /></svg>`,
+                    doc: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2M13.5 15.5H18V17H13.5V15.5M13.5 11.5H18V13H13.5V11.5M6 11.5H11V18.5H6V11.5M13 9V3.5L18.5 9H13Z" /></svg>`,
+                    xls: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2M10.9 18.2L8.8 15.3L6.7 18.2H4.9L7.8 14.3L4.9 10.4H6.7L8.8 13.3L10.9 10.4H12.7L9.8 14.3L12.7 18.2H10.9M13 9V3.5L18.5 9H13Z" /></svg>`,
+                    ppt: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2M13 9V3.5L18.5 9H13M10.2 14C11.1 14 11.9 14.3 12.4 14.9C13 15.4 13.2 16.2 13.2 17.1C13.2 18.1 13 18.8 12.4 19.4C11.9 20 11.1 20.2 10.2 20.2H7V14H10.2M10.1 18.6C10.5 18.6 10.9 18.5 11.1 18.2C11.4 17.9 11.5 17.5 11.5 17.1C11.5 16.6 11.4 16.2 11.1 15.9C10.9 15.6 10.5 15.5 10.1 15.5H8.7V18.6H10.1Z" /></svg>`,
+                    web: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM4.332 8.027a6.012 6.012 0 011.912-2.706C6.512 5.72 7.97 5 10 5c2.03 0 3.488.72 3.756 1.321l-1.538.589A4.491 4.491 0 0010 6a4.5 4.5 0 00-2.432 1.027l-1.24 1z" clip-rule="evenodd" /></svg>`,
+                    local: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V8a2 2 0 00-2-2h-5L9 4H4zm0 6a2 2 0 100 4 2 2 0 000-4z" clip-rule="evenodd" /></svg>`,
+                };
+                const extMap = { docx: 'doc', doc: 'doc', xlsx: 'xls', xls: 'xls', pptx: 'ppt', ppt: 'ppt', pdf: 'pdf' };
+                const iconKey = extMap[ext] || type;
+                const svg = iconMap[iconKey] || iconMap.local;
+                return svg.replace('<svg ', `<svg class="${classes}" `);
+            }
+
+            function getStatusColorClass(status) {
+                const colorMap = {
+                    '未着手': 'text-gray-500 dark:text-gray-400',
+                    '作業中': 'text-blue-500 dark:text-blue-400',
+                    'レビュー中': 'text-yellow-500 dark:text-yellow-400',
+                    '完了': 'text-green-500 dark:text-green-400',
+                };
+                return colorMap[status] || '';
+            }
+
+            function getTypeName(type, filename = '') {
+                 if (type in serviceMaster) return serviceMaster[type].name;
+                 const typeNameMap = { project: 'プロジェクト', folder: 'フォルダ', sharepoint: 'SharePoint', gdrive: 'Google Drive', local: 'ローカルファイル', web: 'Webページ', pdf: 'PDF', doc: 'ドキュメント', xls: 'スプレッドシート', ppt: 'プレゼンテーション' };
+                 
+                 if (filename) {
+                    const ext = filename.split('.').pop().toLowerCase();
+                    const extMap = { docx: 'doc', doc: 'doc', xlsx: 'xls', xls: 'xls', pptx: 'ppt', ppt: 'ppt', pdf: 'pdf' };
+                    const resolvedType = extMap[ext];
+                    if (resolvedType && typeNameMap[resolvedType]) return typeNameMap[resolvedType];
+                 }
+                return typeNameMap[type] || '不明';
+            }
+            
+            function detectAndAssignType(item, isInitialLoad = false) {
+                const originalType = item.type;
+                if (item.url) {
+                    try {
+                        const hostname = new URL(item.url).hostname;
+                        if (hostname.includes('github.com')) item.type = 'github';
+                        else if (hostname.includes('sharepoint.com') || hostname.includes('office.com')) item.type = 'm365';
+                        else if (hostname.includes('box.com')) item.type = 'box';
+                        else if (hostname.includes('dropbox.com')) item.type = 'dropbox';
+                        else if (isInitialLoad && ['sharepoint', 'gdrive'].includes(originalType)) {
+                            item.type = originalType;
+                        } else {
+                            item.type = 'web';
+                        }
+                    } catch (e) { 
+                        if (isInitialLoad) item.type = originalType;
+                    }
+                }
+            }
+            
+            function findItemById(id, items) {
+                for (const item of items) {
+                    if (item.id === id) return item;
+                    if (item.children) {
+                        const found = findItemById(id, item.children);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            }
+
+            function findAndRemoveItemById(id, items) {
+                for (let i = 0; i < items.length; i++) {
+                    if (items[i].id === id) {
+                        return items.splice(i, 1)[0];
+                    }
+                    if (items[i].children) {
+                        const found = findAndRemoveItemById(id, items[i].children);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            }
+
+            function deleteItemById(id) {
+                const parentInfo = findParentInfo(id, data);
+                if (parentInfo) {
+                    const { parent, index } = parentInfo;
+                    parent.splice(index, 1);
+                    return true;
+                }
+                return false;
+            }
+            
+            function findParentInfo(childId, items, parent = null, parentIndex = -1) {
+                 for (let i = 0; i < items.length; i++) {
+                    if (items[i].id === childId) {
+                        return { parent: items, index: i, parentNode: parent };
+                    }
+                    if (items[i].children) {
+                        const found = findParentInfo(childId, items[i].children, items[i], i);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            }
+
+
+            function copyToClipboard(text) {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    alert('パスをコピーしました: ' + text);
+                } catch (err) {
+                    console.error('コピーに失敗しました', err);
+                    alert('コピーに失敗しました。');
+                }
+                document.body.removeChild(textArea);
+            }
+
+            // --- イベントハンドラ ---
+            function setupEventListeners() {
+                explorerViewBtn.addEventListener('click', () => switchView('explorer'));
+                towerViewBtn.addEventListener('click', () => switchView('tower'));
+                listViewBtn.addEventListener('click', () => switchExplorerView('list'));
+                cardViewBtn.addEventListener('click', () => switchExplorerView('card'));
+                groupByTagCheckbox.addEventListener('change', renderCardView);
+                searchInput.addEventListener('input', render);
+
+                treeView.addEventListener('click', (e) => {
+                    const treeItem = e.target.closest('.tree-item');
+                    if (!treeItem) return;
+                    const li = treeItem.parentElement;
+                    const id = li.dataset.id;
+                    const actionBtn = e.target.closest('button[data-action]');
+                    
+                    if (actionBtn) {
+                        e.stopPropagation();
+                        const action = actionBtn.dataset.action;
+                        if (action === 'edit') handleEdit(id);
+                        if (action === 'delete') handleDelete(id);
+                    } else if (e.target.closest('.tree-caret')) {
+                        li.classList.toggle('collapsed');
+                        if (li.classList.contains('collapsed')) expandedNodes.delete(id);
+                        else expandedNodes.add(id);
+                        saveExpandedState();
+                    } else {
+                        selectItem(id);
+                    }
+                });
+                
+                fileList.addEventListener('click', (e) => {
+                    const actionBtn = e.target.closest('button[data-action]');
+                    const selectTarget = e.target.closest('[data-action="select"]');
+
+                    if (actionBtn) {
+                         e.stopPropagation();
+                         const id = actionBtn.dataset.id;
+                         const action = actionBtn.dataset.action;
+                         if (action === 'edit') handleEdit(id);
+                         if (action === 'delete') handleDelete(id);
+                    } else if (selectTarget) {
+                         const id = selectTarget.dataset.id;
+                         selectItem(id);
+                    }
+                });
+                
+                addItemBtn.addEventListener('click', () => {
+                    const parent = findItemById(selectedItemId, data);
+                    const parentId = (parent && ['project', 'folder'].includes(parent.type)) ? selectedItemId : null;
+                    openModal({ parentId: parentId });
+                });
+                
+                cancelBtn.addEventListener('click', () => closeModal());
+                modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+                
+                itemForm.addEventListener('submit', handleFormSubmit);
+                
+                urlPasteInput.addEventListener('paste', handleUrlPaste);
+                itemTypeSelect.addEventListener('change', handleModalTypeChange);
+            }
+
+            function switchView(view) {
+                currentView = view;
+                mainContentArea.classList.toggle('p-4', view === 'explorer');
+                mainContentArea.classList.toggle('bg-gray-50', view === 'explorer');
+                mainContentArea.classList.toggle('dark:bg-gray-800/50', view === 'explorer');
+                
+                explorerView.classList.toggle('hidden', view !== 'explorer');
+                towerView.classList.toggle('hidden', view !== 'tower');
+                if (window.innerWidth >= 768) {
+                     treePane.classList.toggle('hidden', view === 'tower');
+                }
+                
+                explorerViewBtn.classList.toggle('bg-white', view === 'explorer');
+                explorerViewBtn.classList.toggle('dark:bg-gray-900', view === 'explorer');
+                explorerViewBtn.classList.toggle('shadow', view === 'explorer');
+                towerViewBtn.classList.toggle('bg-white', view === 'tower');
+                towerViewBtn.classList.toggle('dark:bg-gray-900', view === 'tower');
+                towerViewBtn.classList.toggle('shadow', view === 'tower');
+                
+                render();
+            }
+            
+            function switchExplorerView(view) {
+                currentExplorerView = view;
+                listViewBtn.classList.toggle('bg-white', view === 'list');
+                listViewBtn.classList.toggle('dark:bg-gray-900', view === 'list');
+                listViewBtn.classList.toggle('shadow', view === 'list');
+                cardViewBtn.classList.toggle('bg-white', view === 'card');
+                cardViewBtn.classList.toggle('dark:bg-gray-900', view === 'card');
+                cardViewBtn.classList.toggle('shadow', view === 'card');
+                
+                if (view === 'list') {
+                    listViewContent.classList.remove('hidden');
+                    cardViewContent.classList.add('hidden');
+                    renderFileListView();
+                } else {
+                    listViewContent.classList.add('hidden');
+                    cardViewContent.classList.remove('hidden');
+                    renderCardView();
+                }
+            }
+
+
+            function selectItem(id) {
+                selectedItemId = id;
+                if (currentView !== 'explorer') {
+                     switchView('explorer');
+                } else {
+                    renderExplorerView();
+                }
+                renderTreeView(); // Keep tree updated
+                if (window.innerWidth < 768) {
+                    document.body.classList.remove('mobile-nav-active');
+                }
+            }
+
+            function handleDrop(evt) {
+                const itemId = evt.item.dataset.id;
+                const newParentEl = evt.to.closest('.tree-node');
+                const newParentId = newParentEl ? newParentEl.dataset.id : null;
+
+                const itemToMove = findAndRemoveItemById(itemId, data);
+                if (!itemToMove) return;
+
+                const newParent = newParentId ? findItemById(newParentId, data) : null;
+
+                if (newParent && ['project', 'folder'].includes(newParent.type)) {
+                    newParent.children = newParent.children || [];
+                    newParent.children.splice(evt.newIndex, 0, itemToMove);
+                    expandedNodes.add(newParentId);
+                } else if (!newParentId) { // Dropped on root
+                    data.splice(evt.newIndex, 0, itemToMove);
+                } else { // Dropped on a file, revert
+                    render(); // Re-render to revert
+                    return;
+                }
+
+                saveData();
+                saveExpandedState();
+                render();
+            }
+
+
+            function setupDragAndDrop() {
+                mainContentArea.addEventListener('dragover', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    if(currentView === 'explorer') mainContentArea.classList.add('drop-zone-active');
+                });
+                mainContentArea.addEventListener('dragleave', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    mainContentArea.classList.remove('drop-zone-active');
+                });
+                mainContentArea.addEventListener('drop', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    mainContentArea.classList.remove('drop-zone-active');
+                    if (currentView !== 'explorer' || !selectedItemId) return;
+
+                    const parent = findItemById(selectedItemId, data);
+                    if (!parent || !['project', 'folder'].includes(parent.type)) return;
+
+                    const files = e.dataTransfer.files;
+                    if (files.length > 0) {
+                        for (const file of files) {
+                            const newItem = {
+                                id: `item-${Date.now()}-${Math.random()}`, name: file.name,
+                                type: 'local', url: `file://${file.path}`, status: '未着手', tags: [], notes: ''
+                            };
+                            parent.children = parent.children || [];
+                            parent.children.push(newItem);
+                        }
+                        saveData(); render();
+                        alert(`${files.length}個のファイルが追加されました。`);
+                    }
+                });
+            }
+            
+            function handleFormSubmit(e) {
+                e.preventDefault();
+                const id = document.getElementById('item-id').value;
+                const parentId = document.getElementById('parent-id').value;
+                const tags = Array.from(tagChipsContainer.querySelectorAll('.tag')).map(chip => chip.querySelector('span').textContent.trim());
+
+                const item = {
+                    id: id || `item-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`, 
+                    name: itemNameInput.value,
+                    type: itemTypeSelect.value, 
+                    url: itemUrlInput.value || null,
+                    status: itemStatusSelect.value,
+                    notes: itemNotesTextarea.value || '',
+                    tags: tags
+                };
+                
+                if (item.type === 'project') {
+                    item.category = document.getElementById('item-category').value.trim() || '未分類';
+                }
+
+                if (['project', 'folder'].includes(item.type)) {
+                    item.children = findItemById(id, data)?.children || [];
+                    delete item.status;
+                    delete item.notes;
+                    delete item.tags;
+                }
+                
+                if (id) {
+                    const itemInfo = findParentInfo(id, data);
+                    if(itemInfo) {
+                        const existingItem = itemInfo.parent[itemInfo.index];
+                        Object.assign(existingItem, item);
+                    }
+                } else {
+                    if (parentId) {
+                        const parent = findItemById(parentId, data);
+                        if(parent) {
+                            parent.children = parent.children || [];
+                            parent.children.push(item);
+                            expandedNodes.add(parentId);
+                            saveExpandedState();
+                        }
+                    } else {
+                        data.push(item);
+                    }
+                }
+                saveData(); render(); closeModal();
+            }
+            
+            async function handleUrlPaste(e) {
+                 setTimeout(async () => {
+                    const value = e.target.value.trim();
+                     try {
+                        new URL(value); // Check if it's a valid URL
+                        itemUrlInput.value = value;
+                        const tempItem = { url: value, type: 'web' };
+                        detectAndAssignType(tempItem);
+                        itemTypeSelect.value = tempItem.type;
+                        
+                        try {
+                            const response = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(value)}`);
+                            if(response.ok) {
+                                const text = await response.text();
+                                const match = text.match(/<title>([^<]*)<\/title>/i);
+                                itemNameInput.value = match ? match[1].trim() : new URL(value).pathname.split('/').pop() || new URL(value).hostname;
+                            } else {
+                               itemNameInput.value = new URL(value).pathname.split('/').pop() || new URL(value).hostname;
+                            }
+                        } catch (error) {
+                             console.warn('Title fetch failed:', error);
+                             itemNameInput.value = new URL(value).pathname.split('/').pop() || new URL(value).hostname;
+                        }
+                        
+                        itemTypeSelect.dispatchEvent(new Event('change'));
+
+                    } catch (_) {
+                        // Not a valid URL, do nothing
+                    }
+                }, 0);
+            }
+            
+            function handleModalTypeChange(e) {
+                const type = e.target.value;
+                const isProject = type === 'project';
+                const isFolderType = ['project', 'folder'].includes(type);
+
+                categoryFieldContainer.style.display = isProject ? 'block' : 'none';
+                statusFieldContainer.style.display = isFolderType ? 'none' : 'block';
+                notesFieldContainer.style.display = isFolderType ? 'none' : 'block';
+                tagsFieldContainer.style.display = isFolderType ? 'none' : 'block';
+                urlFieldContainer.style.display = isFolderType ? 'none' : 'block';
+            }
+
+
+            function handleEdit(id) {
+                const item = findItemById(id, data);
+                openModal({ item: item });
+            }
+            
+            function handleDelete(id) {
+                const item = findItemById(id, data);
+                if (item && confirm(`「${item.name}」を削除しますか？`)) {
+                    const parentInfo = findParentInfo(id, data);
+                    if (selectedItemId === id) {
+                        selectedItemId = parentInfo?.parentNode?.id || (getFilteredData()[0]?.id || null);
+                    }
+                    deleteItemById(id);
+                    saveData(); 
+                    render();
+                }
+            }
+            
+            function openModal({ parentId, item } = {}) {
+                itemForm.reset();
+                tagChipsContainer.innerHTML = '';
+                
+                if (item) { // Edit mode
+                    modalTitle.textContent = 'アイテムを編集';
+                    document.getElementById('item-id').value = item.id;
+                    const parentInfo = findParentInfo(item.id, data);
+                    document.getElementById('parent-id').value = parentInfo?.parentNode?.id || '';
+                    
+                    itemNameInput.value = item.name;
+                    itemTypeSelect.value = item.type;
+                    itemUrlInput.value = item.url || '';
+                    itemStatusSelect.value = item.status || 'なし';
+                    itemNotesTextarea.value = item.notes || '';
+                    if (item.tags) renderTagChips(item.tags);
+                    if (item.type === 'project') itemCategoryInput.value = item.category || '';
+                    
+                    itemTypeSelect.disabled = true;
+                    urlPasteContainer.classList.add('hidden');
+                    manualInputDivider.classList.add('hidden');
+
+                } else { // Add mode
+                    modalTitle.textContent = '新しいアイテムを追加';
+                    document.getElementById('item-id').value = '';
+                    document.getElementById('parent-id').value = parentId || '';
+                    itemTypeSelect.value = 'web'; // Default to web page
+                    itemStatusSelect.value = '未着手';
+                    itemTypeSelect.disabled = false;
+                    urlPasteContainer.classList.remove('hidden');
+                    manualInputDivider.classList.remove('hidden');
+                }
+                
+                handleModalTypeChange({target: itemTypeSelect});
+                
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                urlPasteInput.focus();
+            }
+            
+            function closeModal() {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+
+            // --- Context Menu & Mobile ---
+            function setupContextMenu() {
+                document.addEventListener('click', () => contextMenu.style.display = 'none');
+                contextMenu.addEventListener('click', e => e.stopPropagation());
+
+                explorerContent.addEventListener('contextmenu', e => {
+                    if (e.target === explorerContent || e.target.closest('#empty-state')) {
+                        const parent = findItemById(selectedItemId, data);
+                        if (parent && ['project', 'folder'].includes(parent.type)) {
+                           showContextMenu(e, selectedItemId, true);
+                        }
+                    }
+                });
+            }
+
+            let longPressTimer;
+            function addContextMenuListener(element, itemId) {
+                element.addEventListener('contextmenu', e => showContextMenu(e, itemId));
+                
+                element.addEventListener('touchstart', e => {
+                    e.stopPropagation();
+                    longPressTimer = setTimeout(() => {
+                        e.preventDefault();
+                        showContextMenu(e.touches[0], itemId);
+                    }, 500);
+                });
+                element.addEventListener('touchend', () => clearTimeout(longPressTimer));
+                element.addEventListener('touchmove', () => clearTimeout(longPressTimer));
+            }
+
+            function showContextMenu(e, itemId, isFolderMenu = false) {
+                e.preventDefault();
+                e.stopPropagation();
+                const item = findItemById(itemId, data);
+                if (!item) return;
+
+                contextMenu.innerHTML = '';
+
+                if (isFolderMenu || ['project', 'folder'].includes(item.type)) {
+                     const addItem = document.createElement('button');
+                     addItem.className = 'context-menu-item';
+                     addItem.textContent = '新規アイテムを追加';
+                     addItem.onclick = () => {
+                        openModal({ parentId: itemId });
+                        contextMenu.style.display = 'none';
+                     };
+                     contextMenu.appendChild(addItem);
+                }
+                
+                if (!isFolderMenu && !['project', 'folder'].includes(item.type)) {
+                    const statuses = ['未着手', '作業中', 'レビュー中', '完了', 'なし'];
+                    statuses.forEach(status => {
+                        const menuItem = document.createElement('button');
+                        menuItem.className = 'context-menu-item';
+                        menuItem.textContent = `状態: ${status}`;
+                        menuItem.onclick = () => {
+                            updateItemStatus(itemId, status);
+                            contextMenu.style.display = 'none';
+                        };
+                        contextMenu.appendChild(menuItem);
+                    });
+                }
+                
+                if (contextMenu.children.length === 0) return;
+
+                contextMenu.style.display = 'block';
+                const { innerWidth, innerHeight } = window;
+                const { pageX, pageY } = e;
+                const { offsetWidth, offsetHeight } = contextMenu;
+
+                contextMenu.style.left = `${Math.min(pageX, innerWidth - offsetWidth)}px`;
+                contextMenu.style.top = `${Math.min(pageY, innerHeight - offsetHeight)}px`;
+            }
+
+            function updateItemStatus(itemId, status) {
+                const item = findItemById(itemId, data);
+                if(item) {
+                    item.status = status;
+                    saveData();
+                    render();
+                }
+            }
+            
+            function setupMobileMenu() {
+                mobileMenuBtn.addEventListener('click', () => {
+                    document.body.classList.toggle('mobile-nav-active');
+                });
+                mobileNavOverlay.addEventListener('click', () => {
+                    document.body.classList.remove('mobile-nav-active');
+                });
+            }
+            
+            // --- Tagging ---
+            itemTagsInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ',') {
+                    e.preventDefault();
+                    const tag = itemTagsInput.value.trim();
+                    if (tag) {
+                        addTagChip(tag);
+                        itemTagsInput.value = '';
+                    }
+                }
+            });
+
+            function addTagChip(tag) {
+                const chip = document.createElement('div');
+                chip.className = 'tag';
+                const chipText = document.createElement('span');
+                chipText.textContent = tag;
+                chip.appendChild(chipText);
+                const removeBtn = document.createElement('span');
+                removeBtn.className = 'tag-remove';
+                removeBtn.textContent = '×';
+                removeBtn.onclick = () => chip.remove();
+                chip.appendChild(removeBtn);
+                tagChipsContainer.appendChild(chip);
+            }
+
+            function renderTagChips(tags) {
+                tagChipsContainer.innerHTML = '';
+                tags.forEach(addTagChip);
+            }
+
+            // --- Tabs & Search ---
+            function renderTabs() {
+                const categories = ['すべて', ...new Set(data.map(p => p.category).filter(Boolean))];
+                tabsContainer.innerHTML = '';
+                categories.forEach(cat => {
+                    const tab = document.createElement('button');
+                    tab.className = `px-3 py-1 text-sm font-medium rounded-md m-1 ${activeTab === cat ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}`;
+                    tab.textContent = cat;
+                    tab.onclick = () => {
+                        activeTab = cat;
+                        render();
+                    };
+                    tabsContainer.appendChild(tab);
+                });
+            }
+
+            function getFilteredData() {
+                let filtered = activeTab === 'すべて' ? [...data] : data.filter(p => p.category === activeTab);
+                const query = searchInput.value.toLowerCase().trim();
+
+                if (!query) return filtered;
+
+                const keywords = [];
+                const statusFilters = [];
+                const typeFilters = [];
+                const tagFilters = [];
+
+                const parts = query.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+                parts.forEach(part => {
+                    if (part.startsWith('status:')) {
+                        statusFilters.push(part.substring(7).replace(/"/g, ''));
+                    } else if (part.startsWith('type:')) {
+                        typeFilters.push(part.substring(5).replace(/"/g, ''));
+                    } else if (part.startsWith('tag:')) {
+                        tagFilters.push(part.substring(4).replace(/"/g, ''));
+                    } else {
+                        keywords.push(part.replace(/"/g, ''));
+                    }
+                });
+
+                function itemMatches(item) {
+                    if (item.type === 'project' || item.type === 'folder') return false; // Folders don't match directly
+
+                    const nameMatch = keywords.every(k => item.name.toLowerCase().includes(k));
+                    const notesMatch = keywords.every(k => (item.notes || '').toLowerCase().includes(k));
+                    
+                    const statusMatch = statusFilters.length === 0 || statusFilters.some(s => (item.status || 'なし').toLowerCase() === s);
+                    const typeMatch = typeFilters.length === 0 || typeFilters.some(t => getTypeName(item.type, item.name).toLowerCase().includes(t));
+                    const tagMatch = tagFilters.length === 0 || tagFilters.every(t => (item.tags || []).some(tag => tag.toLowerCase() === t));
+                    
+                    return (nameMatch || notesMatch) && statusMatch && typeMatch && tagMatch;
+                }
+
+                function filterRecursive(items) {
+                    return items.map(item => {
+                        if (item.children) {
+                            const filteredChildren = filterRecursive(item.children);
+                            if (filteredChildren.length > 0) {
+                                return { ...item, children: filteredChildren };
+                            }
+                        }
+                        if (itemMatches(item)) {
+                            return item;
+                        }
+                        return null;
+                    }).filter(Boolean);
+                }
+                
+                return filterRecursive(filtered);
+            }
+
+
+            // --- 初期化 ---
+            init();
+        });
+    </script>
+</body>
+</html>
+
